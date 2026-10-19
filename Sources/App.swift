@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
     private var collapseObserver: AnyCancellable?
+    private var silentObserver: AnyCancellable?
     private let collapsedSize = NSSize(width: 320, height: 56)
     private let expandedMinSize = NSSize(width: 320, height: 420)
     private var statusResetWork: DispatchWorkItem?
@@ -39,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         store.onHeard = { [weak self] ding in self?.flashStatusItem(ding) }
 
         audio.start()
+        audio.setSilent(store.silent)
+        silentObserver = store.$silent.dropFirst().removeDuplicates().sink { [weak self] silent in
+            self?.audio.setSilent(silent)
+            DispatchQueue.main.async { self?.resetStatusItem() }
+        }
         notifications.start()
         checkAudioPermission(promptIfUndetermined: true)
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -200,7 +206,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func resetStatusItem() {
-        statusItem.button?.image = NSImage(systemSymbolName: "bell.and.waves.left.and.right", accessibilityDescription: "Ding Detective")
+        statusItem.button?.image = store.silent
+            ? NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Ding Detective (silent)")
+            : NSImage(systemSymbolName: "bell.and.waves.left.and.right", accessibilityDescription: "Ding Detective")
         statusItem.button?.title = ""
     }
 
@@ -212,6 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.store.collapsed.toggle()
             if !self.panel.isVisible { self.panel.orderFrontRegardless() }
         })
+        menu.addItem(.separator())
+        menu.addItem(item("Silent Mode", checked: store.silent) { [weak self] in self?.store.silent.toggle() })
         menu.addItem(.separator())
         menu.addItem(item("Float Above Windows", checked: !onDesktop) { [weak self] in self?.onDesktop = false })
         menu.addItem(item("Sit on Desktop", checked: onDesktop) { [weak self] in self?.onDesktop = true })

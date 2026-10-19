@@ -16,6 +16,7 @@ final class AudioWatcher {
         let app: AppInfo?
         let isSystemSounds: Bool
         var isSelf = false
+        var keepAudible = false
         var running = false
         var lastRunning = Date.distantPast
         var tap: ProcessTap?
@@ -33,6 +34,8 @@ final class AudioWatcher {
         var edgeDing: (id: UUID, at: Date)?
         var lastDingAt = Date.distantPast
         var mediaUntil = Date.distantPast
+        /// Silent mode leaves this app audible until then (it's playing media / a call).
+        var audibleUntil = Date.distantPast
     }
 
     // Tuning
@@ -41,6 +44,14 @@ final class AudioWatcher {
     private let maxDingLength: TimeInterval = 5 // longer than this is music / video / a call
     private let mediaCooldown: TimeInterval = 60
     private let idleTapLifetime: TimeInterval = 600
+    private let muteReleaseAfter: TimeInterval = 1.2 // a sound this long isn't a ding: let it play
+
+    /// Never muted (or tapped as "system sound"): calls, Siri, dictation, VoiceOver.
+    private static let alwaysAudible: Set<String> = [
+        "com.apple.avconferenced", "com.apple.TelephonyUtilities", "com.apple.assistantd",
+        "com.apple.CoreSpeech", "com.apple.corespeechd_system", "com.apple.universalaccessd",
+        "com.apple.accessibility.heard", "com.apple.cmio.ContinuityCaptureAgent",
+    ]
 
     private let store: DingStore
     private let resolver = AppResolver.shared
@@ -49,10 +60,12 @@ final class AudioWatcher {
     private var systemTap: ProcessTap?
     private var systemTapExclusions: Set<AudioObjectID> = []
     private var systemTapPending = false
+    private var systemTapReadyAt = Date.distantPast
     private var lastLevelLog = Date.distantPast
     private var maxSystemLevel: Float = 0
     private var outputUID: String?
     private var tapsEnabled = false
+    private var silent = false
     private var timer: Timer?
     private var tick = 0
     private let setupQueue = DispatchQueue(label: "ding.tap.setup", qos: .userInitiated)
@@ -78,6 +91,15 @@ final class AudioWatcher {
         if !enabled { tearDownTaps() }
     }
 
+    /// Silent mode: mute dings as they play (app sounds and notification banners), keep logging.
+    func setSilent(_ enabled: Bool) {
+        guard enabled != silent else { return }
+        silent = enabled
+        debugLog("silent mode: \(enabled)")
+        systemTap?.setMuted(enabled)
+        applyMuting(Date())
+    }
+
     // MARK: Loop
 
     private func step() {
@@ -94,7 +116,9 @@ final class AudioWatcher {
             levels[key] = max(levels[key] ?? 0, tap.meter.take())
         }
         if let systemTap {
-            let level = systemTap.meter.take()
+            var level = systemTap.meter.take()
+            // A freshly started tap delivers a burst of startup noise; ignore its first second.
+            if now.timeIntervalSince(systemTapReadyAt) < 1 { level = 0 }
             levels[Self.systemKey] = level
             maxSystemLevel = max(maxSystemLevel, level)
             if now.timeIntervalSince(lastLevelLog) > 2 {
@@ -105,6 +129,26 @@ final class AudioWatcher {
         }
         for key in Set(levels.keys).union(sources.keys) {
             meter(key, level: levels[key] ?? 0, now: now)
+        }
+        applyMuting(now)
+    }
+
+    /// Apps whose sound is never a ding: voice assistants and calls.
+    private static let alwaysAudibleApps: Set<String> = [
+        "com.apple.Siri", "com.apple.SiriNCService", "com.apple.FaceTime", "com.apple.TelephonyUtilities",
+    ]
+
+    private func shouldMute(_ bundleID: String, now: Date) -> Bool {
+        guard silent, tapsEnabled, !Self.alwaysAudibleApps.contains(bundleID) else { return false }
+        let source = sources[bundleID]
+        return now >= (source?.audibleUntil ?? .distantPast) && now >= (source?.mediaUntil ?? .distantPast)
+    }
+
+    private func applyMuting(_ now: Date) {
+        for proc in procs.values {
+            guard let tap = proc.tap, let id = proc.app?.bundleID else { continue }
+            let mute = shouldMute(id, now: now)
+            if tap.isMuted != mute { tap.setMuted(mute) }
         }
     }
 
@@ -123,7 +167,8 @@ final class AudioWatcher {
                 let bundle = CA.string(object, kAudioProcessPropertyBundleID)
                 let isSystem = bundle == "systemsoundserverd"
                 let app = (pid == getpid() || isSystem) ? nil : resolver.app(forPID: pid)
-                procs[object] = Proc(app: app, isSystemSounds: isSystem, isSelf: pid == getpid())
+                procs[object] = Proc(app: app, isSystemSounds: isSystem, isSelf: pid == getpid(),
+                                     keepAudible: Self.alwaysAudible.contains(bundle ?? ""))
             }
             guard var proc = procs[object] else { continue }
 
@@ -134,7 +179,11 @@ final class AudioWatcher {
             if running {
                 proc.lastRunning = now
                 if !proc.running { processStartedOutput(object, proc: &proc, app: app, now: now) }
-            } else if let tap = proc.tap, now.timeIntervalSince(proc.lastRunning) > idleTapLifetime {
+            }
+            if silent && tapsEnabled && proc.tap == nil && !proc.tapPending {
+                // Tap ahead of time so even an app's first ding is caught muted.
+                startTap(object, proc: &proc, app: app)
+            } else if !running, !silent, let tap = proc.tap, now.timeIntervalSince(proc.lastRunning) > idleTapLifetime {
                 tap.invalidate()
                 proc.tap = nil
                 proc.tapReadyAt = nil
@@ -146,7 +195,7 @@ final class AudioWatcher {
 
         if tapsEnabled {
             // System tap hears every process that isn't an app (or us): banner sounds, alerts, beeps.
-            let exclusions = Set(procs.filter { $0.value.app != nil || $0.value.isSelf }.keys)
+            let exclusions = Set(procs.filter { $0.value.app != nil || $0.value.isSelf || $0.value.keepAudible }.keys)
             if !systemTapPending && (systemTap == nil || exclusions != systemTapExclusions) {
                 makeSystemTap(excluding: exclusions)
             }
@@ -172,18 +221,22 @@ final class AudioWatcher {
         }
         sources[app.bundleID] = source
 
-        if proc.tap == nil && !proc.tapPending, let uid = outputUID {
-            proc.tapPending = true
-            setupQueue.async { [weak self] in
-                let tap = ProcessTap(processes: [object], outputUID: uid)
-                DispatchQueue.main.async {
-                    debugLog("tap for \(app.name): \(tap == nil ? "FAILED" : "ok")")
-                    guard let self, self.tapsEnabled, var current = self.procs[object] else { tap?.invalidate(); return }
-                    current.tap = tap
-                    current.tapReadyAt = Date()
-                    current.tapPending = false
-                    self.procs[object] = current
-                }
+        if proc.tap == nil && !proc.tapPending { startTap(object, proc: &proc, app: app) }
+    }
+
+    private func startTap(_ object: AudioObjectID, proc: inout Proc, app: AppInfo) {
+        guard let uid = outputUID else { return }
+        proc.tapPending = true
+        let muted = shouldMute(app.bundleID, now: Date())
+        setupQueue.async { [weak self] in
+            let tap = ProcessTap(processes: [object], muted: muted, outputUID: uid)
+            DispatchQueue.main.async {
+                debugLog("tap for \(app.name): \(tap == nil ? "FAILED" : "ok")\(muted ? " (muted)" : "")")
+                guard let self, self.tapsEnabled, var current = self.procs[object] else { tap?.invalidate(); return }
+                current.tap = tap
+                current.tapReadyAt = Date()
+                current.tapPending = false
+                self.procs[object] = current
             }
         }
     }
@@ -191,15 +244,18 @@ final class AudioWatcher {
     private func makeSystemTap(excluding exclusions: Set<AudioObjectID>) {
         guard let uid = outputUID else { return }
         systemTapPending = true
+        let muted = silent
         setupQueue.async { [weak self] in
-            let tap = ProcessTap(processes: Array(exclusions), excluding: true, outputUID: uid)
+            let tap = ProcessTap(processes: Array(exclusions), excluding: true, muted: muted, outputUID: uid)
             DispatchQueue.main.async {
                 guard let self else { tap?.invalidate(); return }
                 self.systemTapPending = false
                 guard self.tapsEnabled else { tap?.invalidate(); return }
                 let first = self.systemTap == nil
                 self.systemTap?.invalidate()
+                tap?.setMuted(self.silent)
                 self.systemTap = tap
+                self.systemTapReadyAt = Date()
                 self.systemTapExclusions = exclusions
                 if first { debugLog("system sound tap: \(tap == nil ? "FAILED" : "ok") (excluding \(exclusions.count) app processes)") }
             }
@@ -219,12 +275,19 @@ final class AudioWatcher {
                     source.dingID = nil
                 } else {
                     let isSystem = key == Self.systemKey
-                    source.dingID = store.recordSound(app: isSystem ? nil : source.app, viaSystem: isSystem, at: now)
+                    let silenced = isSystem ? silent && tapsEnabled : shouldMute(key, now: now)
+                    source.dingID = store.recordSound(app: isSystem ? nil : source.app, viaSystem: isSystem,
+                                                      silenced: silenced, at: now)
                     source.lastDingAt = now
                 }
                 source.edgeDing = nil
             }
             source.lastLoud = now
+            // Too long for a ding (or already playing media): let this app be heard while it lasts.
+            if key != Self.systemKey, let start = source.segmentStart,
+               now.timeIntervalSince(start) > muteReleaseAfter || now < source.audibleUntil {
+                source.audibleUntil = now.addingTimeInterval(mediaCooldown)
+            }
             if let start = source.segmentStart, now.timeIntervalSince(start) > maxDingLength {
                 if let id = source.dingID { store.discardSound(id); source.dingID = nil }
                 source.mediaUntil = now.addingTimeInterval(mediaCooldown)

@@ -76,18 +76,23 @@ final class LevelMeter: @unchecked Sendable {
 
 final class ProcessTap {
     let meter = LevelMeter()
+    private let description: CATapDescription
+    private(set) var isMuted: Bool
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private static let queue = DispatchQueue(label: "ding.tap.io", qos: .userInitiated)
 
     /// `excluding: true` taps everything *except* the given processes.
-    init?(processes: [AudioObjectID], excluding: Bool = false, outputUID: String) {
+    /// `muted: true` silences the tapped processes' output while still metering it.
+    init?(processes: [AudioObjectID], excluding: Bool = false, muted: Bool = false, outputUID: String) {
         let description = excluding
             ? CATapDescription(stereoGlobalTapButExcludeProcesses: processes)
             : CATapDescription(stereoMixdownOfProcesses: processes)
         description.uuid = UUID()
-        description.muteBehavior = .unmuted
+        description.muteBehavior = muted ? .muted : .unmuted
+        self.description = description
+        self.isMuted = muted
         description.isPrivate = true
 
         var tap = AudioObjectID(kAudioObjectUnknown)
@@ -131,6 +136,20 @@ final class ProcessTap {
         guard status == noErr, let procID else { invalidate(); return nil }
         ioProcID = procID
         guard AudioDeviceStart(aggregateID, procID) == noErr else { invalidate(); return nil }
+    }
+
+    /// Mutes or unmutes the tapped output in place (no need to rebuild the tap).
+    @discardableResult
+    func setMuted(_ muted: Bool) -> Bool {
+        guard muted != isMuted, tapID != kAudioObjectUnknown else { return true }
+        description.muteBehavior = muted ? .muted : .unmuted
+        var addr = CA.address(kAudioTapPropertyDescription)
+        var ref: CATapDescription = description
+        let status = withUnsafeMutablePointer(to: &ref) {
+            AudioObjectSetPropertyData(tapID, &addr, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), $0)
+        }
+        if status == noErr { isMuted = muted } else { debugLog("setMuted(\(muted)) failed: \(status)") }
+        return status == noErr
     }
 
     func invalidate() {

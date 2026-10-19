@@ -32,6 +32,16 @@ struct WidgetView: View {
             }
         }
         .environment(\.colorScheme, .dark)
+        // Ding Detective has no Dock icon, so the widget itself offers a way out.
+        .contextMenu {
+            Button(store.collapsed ? "Expand" : "Collapse") { store.collapsed.toggle() }
+            Toggle("Silent Mode", isOn: $store.silent)
+            Button("Hide Widget") {
+                NSApp.windows.first { $0 is WidgetPanel }?.orderOut(nil)
+            }
+            Divider()
+            Button("Quit Ding Detective") { NSApp.terminate(nil) }
+        }
     }
 }
 
@@ -117,13 +127,15 @@ struct CollapsedBar: View {
                         .font(Theme.rounded(11, .medium).monospacedDigit())
                         .foregroundStyle(.white.opacity(0.45))
                         .fixedSize()
+                    if store.silent { SilentToggle(store: store) }
                 } else {
                     BrandMark(size: 36, ringing: store.lastHeardID)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Ding Detective").font(Theme.rounded(13.5, .semibold)).foregroundStyle(.white)
-                        LiveLabel(text: "Listening")
+                        LiveLabel(text: store.silent ? "Silent · still logging" : "Listening")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    if store.silent { SilentToggle(store: store) }
                 }
                 CircleButton(symbol: "chevron.down", help: "Expand") { store.collapsed = false }
             }
@@ -174,9 +186,11 @@ struct ExpandedWidget: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Ding Detective").font(Theme.rounded(14.5, .semibold)).foregroundStyle(.white)
                 let today = store.dings.filter { $0.heard && Calendar.current.isDateInToday($0.date) }.count
-                LiveLabel(text: today == 0 ? "Listening" : "Listening · \(today) today")
+                let state = store.silent ? "Silent" : "Listening"
+                LiveLabel(text: today == 0 ? state : "\(state) · \(today) today")
             }
             Spacer()
+            SilentToggle(store: store)
             CircleButton(symbol: "chevron.up", help: "Collapse to a bar") { store.collapsed = true }
         }
     }
@@ -392,7 +406,12 @@ struct DingRow: View {
                 .transition(.opacity)
             } else {
                 HStack(spacing: 6) {
-                    if ding.heard {
+                    if ding.silenced == true {
+                        Image(systemName: "speaker.slash.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.accent.opacity(0.8))
+                            .help("Muted by silent mode")
+                    } else if ding.heard {
                         Circle().fill(Theme.accent).frame(width: 6, height: 6)
                             .shadow(color: Theme.accent.opacity(0.8), radius: 3)
                             .help("Made a sound")
@@ -526,7 +545,9 @@ struct PermissionCallout: View {
 
     var body: some View {
         if !store.preciseAudio {
-            callout("Turn on sound access to hear notification banners", action: "Enable", perform: requestAudio)
+            callout(store.silent ? "Silent mode needs sound access to mute dings"
+                                 : "Turn on sound access to hear notification banners",
+                    action: "Enable", perform: requestAudio)
         } else if !store.notificationAccess {
             callout("Allow Full Disk Access to see what notifications said", action: "Allow",
                     perform: Permissions.openFullDiskAccessSettings)
@@ -630,6 +651,30 @@ struct LiveLabel: View {
             Text(text).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
         }
         .onAppear { pulse = true }
+    }
+}
+
+/// Speaker button that turns silent mode on and off; lit up while dings are being muted.
+struct SilentToggle: View {
+    @ObservedObject var store: DingStore
+    @State private var hover = false
+
+    var body: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { store.silent.toggle() }
+        } label: {
+            Image(systemName: store.silent ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(store.silent ? AnyShapeStyle(Theme.onAccent) : AnyShapeStyle(.white.opacity(hover ? 1 : 0.7)))
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(store.silent ? AnyShapeStyle(Theme.brand)
+                                                       : AnyShapeStyle(.white.opacity(hover ? 0.2 : 0.1))))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(store.silent ? "Silent mode is on: dings are muted but still logged. Click to turn it off."
+                           : "Silent mode: mute dings but keep logging them")
     }
 }
 

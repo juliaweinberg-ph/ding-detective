@@ -12,6 +12,8 @@ struct Ding: Codable, Identifiable, Equatable {
     /// Sound came from the system sound server (notification banner / alert), not the app itself.
     var viaSystem = false
     var duration: Double = 0
+    /// Silent mode muted it as it played.
+    var silenced: Bool?
     var title: String?
     var subtitle: String?
     var body: String?
@@ -57,6 +59,10 @@ final class DingStore: ObservableObject {
         didSet { UserDefaults.standard.set(soundsOnly, forKey: "soundsOnly") }
     }
     @Published var appFilter: String?
+    /// Silent mode: dings are muted as they play but still logged.
+    @Published var silent: Bool {
+        didSet { UserDefaults.standard.set(silent, forKey: "silent") }
+    }
     /// Widget shrunk to a one-line bar showing just the latest ding.
     @Published var collapsed: Bool {
         didSet { UserDefaults.standard.set(collapsed, forKey: "collapsed") }
@@ -86,6 +92,7 @@ final class DingStore: ObservableObject {
         ignored = Set(UserDefaults.standard.stringArray(forKey: "ignored") ?? Array(Self.defaultIgnored))
         soundsOnly = UserDefaults.standard.object(forKey: "soundsOnly") as? Bool ?? false
         collapsed = UserDefaults.standard.bool(forKey: "collapsed")
+        silent = UserDefaults.standard.bool(forKey: "silent")
         if let data = try? Data(contentsOf: fileURL),
            let saved = try? JSONDecoder().decode([Ding].self, from: data) {
             dings = saved
@@ -133,7 +140,7 @@ final class DingStore: ObservableObject {
     /// A sound was detected. `app` is nil for system-played sounds (notification banners),
     /// which get attributed once the matching notification shows up.
     @discardableResult
-    func recordSound(app: AppInfo?, viaSystem: Bool, at date: Date = Date()) -> UUID? {
+    func recordSound(app: AppInfo?, viaSystem: Bool, silenced: Bool = false, at date: Date = Date()) -> UUID? {
         if let id = app?.bundleID, ignored.contains(id) { return nil }
         if app == nil, dings.contains(where: { $0.heard && $0.bundleID != nil && !$0.viaSystem
                                                && abs($0.date.timeIntervalSince(date)) < 1.5 }) {
@@ -148,12 +155,13 @@ final class DingStore: ObservableObject {
         }) {
             dings[index].heard = true
             dings[index].viaSystem = viaSystem
+            dings[index].silenced = silenced
             announce(dings[index])
             return dings[index].id
         }
 
         let ding = Ding(date: date, bundleID: app?.bundleID, appName: app?.name ?? "System sound",
-                        appPath: app?.path, heard: true, viaSystem: viaSystem)
+                        appPath: app?.path, heard: true, viaSystem: viaSystem, silenced: silenced)
         insert(ding)
         announce(ding)
         return ding.id
@@ -260,7 +268,7 @@ final class DingStore: ObservableObject {
     }
 
     private func announce(_ ding: Ding) {
-        debugLog("DING \(ding.appName) system=\(ding.viaSystem) \(ding.summary ?? "")")
+        debugLog("DING \(ding.appName) system=\(ding.viaSystem) silenced=\(ding.silenced == true) \(ding.summary ?? "")")
         lastHeardID = ding.id
         onHeard?(ding)
         scheduleSave()
