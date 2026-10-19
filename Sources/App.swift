@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ServiceManagement
 import SwiftUI
 
@@ -21,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var notifications = NotificationWatcher(store: store)
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
+    private var collapseObserver: AnyCancellable?
+    private let collapsedSize = NSSize(width: 280, height: 48)
+    private let expandedMinSize = NSSize(width: 320, height: 420)
     private var statusResetWork: DispatchWorkItem?
     private var permissionTimer: Timer?
 
@@ -73,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Panel
 
     private func setUpPanel() {
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 560),
+        panel = WidgetPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 560),
                         styleMask: [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel, .utilityWindow],
                         backing: .buffered, defer: false)
         panel.titlebarAppearsTransparent = true
@@ -90,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         effect.blendingMode = .behindWindow
         effect.state = .active
         let hosting = NSHostingView(rootView: WidgetView(store: store, requestAudio: { [weak self] in self?.requestAudio() }))
+        hosting.sizingOptions = []   // the panel's frame is managed here, not by SwiftUI
         hosting.translatesAutoresizingMaskIntoConstraints = false
         effect.addSubview(hosting)
         NSLayoutConstraint.activate([
@@ -106,6 +111,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         panel.setFrameAutosaveName("DingWidget")
         applyWindowLevel()
+        applyCollapsed(animated: false)
+        collapseObserver = store.$collapsed.dropFirst().removeDuplicates().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.applyCollapsed(animated: true) }
+        }
+    }
+
+    /// Resizes the panel for the collapsed bar or the full widget, keeping its top edge in place
+    /// (and its right edge, when it sits on the right half of the screen).
+    private func applyCollapsed(animated: Bool) {
+        let defaults = UserDefaults.standard
+        var frame = panel.frame
+        let screen = (panel.screen ?? NSScreen.main)?.visibleFrame ?? frame
+        let top = frame.maxY
+        let right = frame.maxX
+        let anchorRight = frame.midX > screen.midX
+
+        if store.collapsed {
+            if frame.height > collapsedSize.height + 1 {
+                defaults.set(NSStringFromSize(frame.size), forKey: "expandedSize")
+            }
+            frame.size = collapsedSize
+            panel.styleMask.remove(.resizable)
+            panel.contentMinSize = collapsedSize
+        } else {
+            var size = defaults.string(forKey: "expandedSize").map(NSSizeFromString) ?? NSSize(width: 340, height: 560)
+            if size.height <= collapsedSize.height + 1 { size = NSSize(width: 340, height: 560) }
+            size.width = max(size.width, expandedMinSize.width)
+            size.height = max(size.height, expandedMinSize.height)
+            frame.size = size
+            panel.styleMask.insert(.resizable)
+            panel.contentMinSize = expandedMinSize
+        }
+
+        frame.origin.y = top - frame.height
+        if anchorRight { frame.origin.x = right - frame.width }
+        // Expanding near the bottom of the screen: slide up rather than run off it.
+        if frame.minY < screen.minY { frame.origin.y = screen.minY }
+        panel.setFrame(frame, display: true, animate: animated)
     }
 
     private func applyWindowLevel() {
@@ -172,6 +215,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(item(panel.isVisible ? "Hide Widget" : "Show Widget") { [weak self] in self?.togglePanel() })
+        menu.addItem(item(store.collapsed ? "Expand Widget" : "Collapse Widget") { [weak self] in
+            guard let self else { return }
+            self.store.collapsed.toggle()
+            if !self.panel.isVisible { self.panel.orderFrontRegardless() }
+        })
         menu.addItem(.separator())
         menu.addItem(item("Float Above Windows", checked: !onDesktop) { [weak self] in self?.onDesktop = false })
         menu.addItem(item("Sit on Desktop", checked: onDesktop) { [weak self] in self?.onDesktop = true })
@@ -219,4 +267,10 @@ final class ClosureMenuItem: NSMenuItem {
     }
     required init(coder: NSCoder) { fatalError() }
     @objc private func fire() { handler() }
+}
+
+/// Double-clicking an empty spot would otherwise trigger the system zoom/minimize title bar action.
+final class WidgetPanel: NSPanel {
+    override func zoom(_ sender: Any?) {}
+    override func miniaturize(_ sender: Any?) {}
 }

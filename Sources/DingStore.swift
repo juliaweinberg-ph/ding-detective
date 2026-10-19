@@ -57,6 +57,10 @@ final class DingStore: ObservableObject {
         didSet { UserDefaults.standard.set(soundsOnly, forKey: "soundsOnly") }
     }
     @Published var appFilter: String?
+    /// Widget shrunk to a one-line bar showing just the latest ding.
+    @Published var collapsed: Bool {
+        didSet { UserDefaults.standard.set(collapsed, forKey: "collapsed") }
+    }
     @Published var preciseAudio = false
     @Published var notificationAccess = false
     /// Bumped whenever a ding is heard, so the UI can flash.
@@ -81,6 +85,7 @@ final class DingStore: ObservableObject {
         fileURL = dir.appendingPathComponent("dings.json")
         ignored = Set(UserDefaults.standard.stringArray(forKey: "ignored") ?? Array(Self.defaultIgnored))
         soundsOnly = UserDefaults.standard.object(forKey: "soundsOnly") as? Bool ?? false
+        collapsed = UserDefaults.standard.bool(forKey: "collapsed")
         if let data = try? Data(contentsOf: fileURL),
            let saved = try? JSONDecoder().decode([Ding].self, from: data) {
             dings = saved

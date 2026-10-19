@@ -10,6 +10,14 @@ struct WidgetView: View {
     enum Tab: String, CaseIterable { case feed = "Feed", catalogue = "By app" }
 
     var body: some View {
+        if store.collapsed {
+            CollapsedBar(store: store)
+        } else {
+            expanded
+        }
+    }
+
+    private var expanded: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(spacing: 10) {
                 header
@@ -39,6 +47,54 @@ struct WidgetView: View {
             Text("Ding Detective").font(.headline)
             Spacer()
             ListeningDot()
+            iconButton("chevron.up", help: "Collapse to a bar") { store.collapsed = true }
+        }
+    }
+}
+
+// MARK: - Collapsed bar
+
+/// One-line version of the widget: the latest ding and a button to expand.
+struct CollapsedBar: View {
+    @ObservedObject var store: DingStore
+    @State private var flash = false
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 8) {
+                if let ding = store.latestHeard {
+                    Button { store.open(ding) } label: {
+                        HStack(spacing: 8) {
+                            AppIcon(ding: ding, size: 24)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(ding.isIdentified ? ding.appName : "System sound")
+                                    .font(.callout.weight(.semibold)).lineLimit(1)
+                                Text(ding.summary ?? relative(ding.date, now: context.date))
+                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Go to \(ding.isIdentified ? ding.appName : "it")")
+                    Text(relative(ding.date, now: context.date))
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        .fixedSize()
+                } else {
+                    Image(systemName: "bell.and.waves.left.and.right.fill").foregroundStyle(.orange)
+                    Text("Listening for dings…").font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                iconButton("chevron.down", help: "Expand") { store.collapsed = false }
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(flash ? Color.orange.opacity(0.35) : Color.clear)
+        }
+        .onChange(of: store.lastHeardID) { _, _ in
+            withAnimation(.easeOut(duration: 0.15)) { flash = true }
+            withAnimation(.easeIn(duration: 1.6).delay(0.4)) { flash = false }
         }
     }
 }
