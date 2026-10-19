@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
     private var collapseObserver: AnyCancellable?
-    private let collapsedSize = NSSize(width: 300, height: 52)
+    private let collapsedSize = NSSize(width: 320, height: 56)
     private let expandedMinSize = NSSize(width: 320, height: 420)
     private var statusResetWork: DispatchWorkItem?
     private var permissionTimer: Timer?
@@ -77,33 +77,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Panel
 
     private func setUpPanel() {
-        panel = WidgetPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 560),
-                        styleMask: [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel, .utilityWindow],
-                        backing: .buffered, defer: false)
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
+        // Borderless and transparent: SwiftUI draws the glass card / capsule, and the window
+        // shadow follows its shape.
+        panel = WidgetPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 580),
+                            styleMask: [.borderless, .resizable, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        [.closeButton, .miniaturizeButton, .zoomButton].forEach { panel.standardWindowButton($0)?.isHidden = true }
+        panel.hasShadow = true
 
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
         let hosting = NSHostingView(rootView: WidgetView(store: store, requestAudio: { [weak self] in self?.requestAudio() }))
         hosting.sizingOptions = []   // the panel's frame is managed here, not by SwiftUI
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: effect.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-        ])
-        panel.contentView = effect
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = .clear
+        panel.contentView = hosting
 
         if !panel.setFrameUsingName("DingWidget"), let screen = NSScreen.main {
             let visible = screen.visibleFrame
@@ -135,8 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             panel.styleMask.remove(.resizable)
             panel.contentMinSize = collapsedSize
         } else {
-            var size = defaults.string(forKey: "expandedSize").map(NSSizeFromString) ?? NSSize(width: 340, height: 560)
-            if size.height <= collapsedSize.height + 1 { size = NSSize(width: 340, height: 560) }
+            var size = defaults.string(forKey: "expandedSize").map(NSSizeFromString) ?? NSSize(width: 340, height: 580)
+            if size.height <= collapsedSize.height + 1 { size = NSSize(width: 340, height: 580) }
             size.width = max(size.width, expandedMinSize.width)
             size.height = max(size.height, expandedMinSize.height)
             frame.size = size
@@ -149,6 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Expanding near the bottom of the screen: slide up rather than run off it.
         if frame.minY < screen.minY { frame.origin.y = screen.minY }
         panel.setFrame(frame, display: true, animate: animated)
+        // The shadow is computed from what's drawn, so refresh it once SwiftUI has redrawn the new shape.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.panel.invalidateShadow() }
     }
 
     private func applyWindowLevel() {
@@ -271,6 +263,7 @@ final class ClosureMenuItem: NSMenuItem {
 
 /// Double-clicking an empty spot would otherwise trigger the system zoom/minimize title bar action.
 final class WidgetPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
     override func zoom(_ sender: Any?) {}
     override func miniaturize(_ sender: Any?) {}
 }

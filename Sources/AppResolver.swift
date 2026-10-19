@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import SwiftUI
 
 struct AppInfo: Hashable, Codable {
     let bundleID: String
@@ -70,6 +71,53 @@ final class AppResolver {
         }
         iconCache[key] = image
         return image
+    }
+
+    private var tintCache: [String: Color] = [:]
+
+    /// A vivid colour pulled from the app's icon, used to tint the "latest ding" card.
+    func tint(for bundleID: String?, path: String?) -> Color {
+        let key = path ?? bundleID ?? "?"
+        if let cached = tintCache[key] { return cached }
+        var result = Color(red: 0.84, green: 1.0, blue: 0.0)
+        let image = icon(for: bundleID, path: path)
+        let side = 24
+        if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8,
+                                      samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: 0, bitsPerPixel: 0) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            image.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+            NSGraphicsContext.restoreGraphicsState()
+            // Bucket vivid pixels by hue and use the most common hue, so a multicoloured icon
+            // (Chrome, Slack) picks one of its colours instead of averaging them into mud.
+            let bins = 12
+            var weight = [Double](repeating: 0, count: bins)
+            var hueSum = [Double](repeating: 0, count: bins)
+            var brightSum = [Double](repeating: 0, count: bins)
+            for x in 0..<side {
+                for y in 0..<side {
+                    guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          c.alphaComponent > 0.5, c.saturationComponent > 0.3, c.brightnessComponent > 0.3 else { continue }
+                    let bin = min(bins - 1, Int(c.hueComponent * Double(bins)))
+                    // Yellows turn olive over dark glass, so let an icon's other colours win.
+                    let isYellow = (0.11...0.2).contains(c.hueComponent)
+                    let w = c.saturationComponent * c.brightnessComponent * (isYellow ? 0.35 : 1)
+                    weight[bin] += w
+                    hueSum[bin] += c.hueComponent * w
+                    brightSum[bin] += c.brightnessComponent * w
+                }
+            }
+            if let best = weight.indices.max(by: { weight[$0] < weight[$1] }), weight[best] > 1 {
+                let hue = hueSum[best] / weight[best]
+                let brightness = brightSum[best] / weight[best]
+                result = Color(nsColor: NSColor(hue: hue, saturation: 0.75, brightness: min(0.85, max(0.6, brightness)), alpha: 1))
+            } else {
+                result = Color(white: 0.55)   // greyscale icon
+            }
+        }
+        tintCache[key] = result
+        return result
     }
 
     private static func prettify(_ bundleID: String) -> String {
