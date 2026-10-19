@@ -42,60 +42,119 @@ struct WidgetView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "bell.and.waves.left.and.right.fill")
-                .foregroundStyle(.orange)
+            BrandMark(size: 22, ringing: store.lastHeardID)
             Text("Ding Detective").font(.headline)
             Spacer()
             ListeningDot()
-            iconButton("chevron.up", help: "Collapse to a bar") { store.collapsed = true }
+            CircleButton(symbol: "chevron.up", help: "Collapse to a bar") { store.collapsed = true }
         }
     }
 }
 
 // MARK: - Collapsed bar
 
-/// One-line version of the widget: the latest ding and a button to expand.
+/// One-line version of the widget: the brand mark, the latest ding, and a button to expand.
 struct CollapsedBar: View {
     @ObservedObject var store: DingStore
     @State private var flash = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
+                BrandMark(size: 30, ringing: store.lastHeardID)
+
                 if let ding = store.latestHeard {
                     Button { store.open(ding) } label: {
-                        HStack(spacing: 8) {
-                            AppIcon(ding: ding, size: 24)
-                            VStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 5) {
+                                AppIcon(ding: ding, size: 14)
                                 Text(ding.isIdentified ? ding.appName : "System sound")
-                                    .font(.callout.weight(.semibold)).lineLimit(1)
-                                Text(ding.summary ?? relative(ding.date, now: context.date))
-                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                    .font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                                Text("· \(relative(ding.date, now: context.date))")
+                                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                                    .lineLimit(1).fixedSize()
                             }
+                            Text(ding.summary ?? (ding.isIdentified ? "Made a sound" : "Played by macOS"))
+                                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("Go to \(ding.isIdentified ? ding.appName : "it")")
-                    Text(relative(ding.date, now: context.date))
-                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                        .fixedSize()
                 } else {
-                    Image(systemName: "bell.and.waves.left.and.right.fill").foregroundStyle(.orange)
-                    Text("Listening for dings…").font(.callout).foregroundStyle(.secondary)
-                    Spacer()
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Ding Detective").font(.system(size: 12, weight: .semibold))
+                        HStack(spacing: 4) {
+                            Circle().fill(.green).frame(width: 5, height: 5)
+                            Text("Listening for dings").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                iconButton("chevron.down", help: "Expand") { store.collapsed = false }
+
+                CircleButton(symbol: "chevron.down", help: "Expand") { store.collapsed = false }
             }
-            .padding(.horizontal, 12)
+            .padding(.leading, 9)
+            .padding(.trailing, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(flash ? Color.orange.opacity(0.35) : Color.clear)
+            .background(Color.orange.opacity(flash ? 0.28 : 0))
         }
         .onChange(of: store.lastHeardID) { _, _ in
             withAnimation(.easeOut(duration: 0.15)) { flash = true }
             withAnimation(.easeIn(duration: 1.6).delay(0.4)) { flash = false }
         }
+    }
+}
+
+/// Small round button used for collapse / expand.
+struct CircleButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(hover ? .primary : .secondary)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.primary.opacity(hover ? 0.15 : 0.08)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(help)
+    }
+}
+
+/// The app icon's orange bell tile. Wiggles whenever `ringing` changes.
+struct BrandMark: View {
+    let size: CGFloat
+    var ringing: UUID?
+    @State private var angle: Double = 0
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+            .fill(LinearGradient(colors: [Color(red: 1, green: 0.62, blue: 0.2), Color(red: 0.93, green: 0.3, blue: 0.15)],
+                                 startPoint: .top, endPoint: .bottom))
+            .frame(width: size, height: size)
+            .overlay(
+                Image(systemName: "bell.and.waves.left.and.right.fill")
+                    .font(.system(size: size * 0.42, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .rotationEffect(.degrees(angle), anchor: .top)
+            )
+            .shadow(color: Color(red: 0.93, green: 0.3, blue: 0.15).opacity(0.35), radius: 3, y: 1)
+            .onChange(of: ringing) { _, _ in
+                Task { @MainActor in
+                    for target in [16.0, -13, 9, -5, 0] {
+                        withAnimation(.easeInOut(duration: 0.09)) { angle = target }
+                        try? await Task.sleep(for: .milliseconds(90))
+                    }
+                }
+            }
     }
 }
 

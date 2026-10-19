@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
     private var collapseObserver: AnyCancellable?
-    private let collapsedSize = NSSize(width: 280, height: 48)
+    private let collapsedSize = NSSize(width: 300, height: 52)
     private let expandedMinSize = NSSize(width: 320, height: 420)
     private var statusResetWork: DispatchWorkItem?
     private var permissionTimer: Timer?
